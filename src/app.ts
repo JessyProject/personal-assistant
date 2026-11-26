@@ -1,12 +1,39 @@
 import { timingSafeEqual } from 'node:crypto'
+import { setTimeout } from 'node:timers/promises'
 import { neon } from '@neon/ai-sdk-provider'
+import { runs, tasks } from '@trigger.dev/sdk'
 import { generateText } from 'ai'
 import { Hono } from 'hono'
+import type { testAi } from './trigger/test-ai.js'
 
 const app = new Hono()
 
 app.get('/', (c) => {
   return c.text('Hello Hono!')
+})
+
+app.get('/test/ai', async (c) => {
+  c.header('Cache-Control', 'public, max-age=60')
+  try {
+    // Reuse one run per five-minute window across concurrent public requests.
+    const window = Math.floor(Date.now() / (5 * 60 * 1000))
+    const handle = await tasks.trigger<typeof testAi>('test-ai', {}, {
+      idempotencyKey: `public-test-ai-${window}`,
+      idempotencyKeyTTL: '10m',
+    })
+
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const run = await runs.retrieve(handle)
+      if (run.status === 'COMPLETED' && run.output?.text) return c.text(run.output.text)
+      if (run.isCompleted) break
+      await setTimeout(1000, undefined, { signal: c.req.raw.signal })
+    }
+  } catch {
+    console.error('Public AI test could not complete')
+  }
+
+  c.header('Cache-Control', 'no-store')
+  return c.text('AI test unavailable', 503)
 })
 
 type TelegramMessage = {
